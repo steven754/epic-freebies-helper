@@ -129,6 +129,8 @@ WXPush is independent from Telegram and both can be enabled at once. Because WeC
 
 If shared cloud IP reputation causes unusually difficult hCaptcha challenges, you may optionally add a `BROWSER_PROXY` Secret. Supported forms are `http://username:password@host:port`, `https://...`, `socks4://...`, and `socks5://...`. Without it, browser networking is unchanged. Proxy quality, trust, and cost remain the user's responsibility.
 
+You can instead point the workflow at a Clash subscription via the `PROXY_SUBSCRIPTION` Secret: the workflow downloads [mihomo](https://github.com/MetaCubeX/mihomo), starts a local mixed port at `127.0.0.1:7890`, and only then sets `BROWSER_PROXY` for the browser. A subscription URL cannot be put into `BROWSER_PROXY` directly — `vmess`/`vless`/`trojan`/`hysteria2` are private protocols that a browser cannot speak. Set the `PROXY_NODE_FILTER` Variable (a regex matched against node names) to keep only residential/ISP nodes; datacenter exits do not help with hCaptcha risk scoring. The job summary prints an **Egress IP** section showing both the direct runner IP and the proxied exit, so you can tell residential from datacenter at a glance. See [`.github/workflows/README.md`](.github/workflows/README.md) for details.
+
 If you use `GLM`, start with this set:
 
 **If you plan to use `GLM_API_KEY`, make sure the related Zhipu account has already passed real-name verification, or the API may remain unavailable.**

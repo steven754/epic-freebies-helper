@@ -17,10 +17,13 @@
 2. 安装 `uv` 和 Python 3.12。
 3. 安装系统依赖。
 4. 执行 `uv sync` 安装 Python 依赖。
-5. 下载 Camoufox 浏览器资源。
-6. 打印实际安装的 Camoufox 构建版本，便于判断 Python 包与浏览器二进制是否配套。
-7. 安装 Playwright Firefox 作为浏览器回退方案。
-8. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
+5. 校验 hCaptcha 协议契约。
+6. 下载 Camoufox 浏览器资源。
+7. 打印实际安装的 Camoufox 构建版本，便于判断 Python 包与浏览器二进制是否配套。
+8. 安装 Playwright Firefox 作为浏览器回退方案。
+9. （可选）解析 `BROWSER_PROXY`，或在配置了 `PROXY_SUBSCRIPTION` 时本地起 mihomo 代理桥。
+10. （可选）把出口 IP 与归属组织写入 job summary，便于判断是否为住宅出口。
+11. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
 
 它默认由 GitHub 的 `schedule` 和 `workflow_dispatch` 触发，仓库内的 APScheduler 会被关闭，避免重复调度。
 
@@ -72,6 +75,37 @@
 WXPush 与 Telegram 相互独立、可同时启用；任一渠道发送失败都不会影响领取任务。微信模板标题字段约 20 字上限且不支持换行，因此标题为单行浓缩摘要（直接带 `新领x` / `失败x` 等计数），正文为完整游戏清单；微信原生弹窗只显示正文开头约 20 字，点开消息经 wxpush `/skin` 页查看完整清单。
 
 如果共享云 IP 导致 hCaptcha 风控加重，可选添加 `BROWSER_PROXY` Secret，格式为 `http://用户名:密码@主机:端口`、`https://...`、`socks4://...` 或 `socks5://...`。未配置时网络路径保持不变。
+
+### 关于代理：两种配置方式（二选一）
+
+Epic 会在服务端校验 hCaptcha token。GitHub Hosted Runner 用的是云机房出口 IP，从 2026-09 中旬起，多个互不相关的 Fork 在这一步集体失败（页面报 `Incorrect response. Please refresh the page.`）。**换成住宅/家宽出口是唯一针对根因的修法**，换模型、调解题逻辑都没用——因为 hCaptcha 本身已经判 pass 了。
+
+工作流按下面的优先级自动选择：
+
+| 优先级 | Secret | 说明 |
+| --- | --- | --- |
+| 1 | `BROWSER_PROXY` | 一条具体的 `http://` / `socks5://` 代理地址，原样透传给浏览器 |
+| 2 | `PROXY_SUBSCRIPTION` | Clash 订阅链接，工作流会在 runner 本地起一个 mihomo 把它转成 `http://127.0.0.1:7890` |
+| — | 都不配 | 机房 IP 直连（现状） |
+
+**方式一（推荐）：直接买静态住宅 / ISP 代理**，把地址填进 `BROWSER_PROXY`。
+
+**方式二：用 Clash 订阅链接**，填进 `PROXY_SUBSCRIPTION`。工作流会：
+
+1. 下载 [mihomo](https://github.com/MetaCubeX/mihomo)（clash.meta 内核）
+2. 以订阅为 `proxy-provider` 生成配置，`url-test` 自动选最快节点
+3. 起本地混合端口 `127.0.0.1:7890`，健康检查通过后才写入 `BROWSER_PROXY`
+4. 在 job summary 输出 **Egress IP**，显示直连与走代理两个出口的 IP 和归属组织
+
+三个注意点：
+
+- 订阅里的 `vmess` / `vless` / `trojan` / `hysteria2` 等私有协议浏览器无法直连，必须经过这层转换，所以**订阅链接不能直接填进 `BROWSER_PROXY`**。
+- **机房落地节点对 hCaptcha 风控没有帮助。** 如果订阅里同时有住宅和机房节点，配置仓库 Variable `PROXY_NODE_FILTER`（正则，匹配节点名）只保留住宅节点，例如 `家宽|住宅|住宅|ISP|Residential`。不配则默认 `.*`（取全部节点里最快的）。
+- 桥接失败时工作流会打 `::warning::` 并回退到无代理直连，不会带着一个死代理硬跑。
+
+判断出口到底是不是住宅，看 job summary 的 **Egress IP** 段：`org` 字段是 `Alibaba` / `Tencent` / `Hetzner` / `OVH` / `DigitalOcean` 这类就是机房；是 `China Telecom` / `Comcast` / `Chunghwa Telecom` 这类运营商才是家宽。
+
+
 
 如果你使用 Gemini 官方接口：
 

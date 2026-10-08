@@ -1440,3 +1440,27 @@
   - workflow 增加 always-run 的 `Report Camoufox build` 步骤，把 `camoufox version` 写进 job summary，下次再出问题可直接看到实际使用的浏览器构建版本，无需再从日志反推。
   - 本地验证：`uv lock` 解析 108 个包，`camoufox 0.5.8` / `playwright 1.53.0`（满足 camoufox 0.5.8 的 `<1.63` 上限）/ `maxminddb 2.7.0`；`uv sync` 安装成功；`_camoufox_launch_options()` 产出的屏幕对象类型为 `camoufox.fingerprints.Screen`；降级判定对 `UnknownProperty`、`InvalidPropertyType` 及原有标记均返回 True，对无关 `ValueError` 返回 False；`scripts/check_hcaptcha_contract.py` 通过；`pytest` 为 `97 passed, 2 skipped`；Ruff、Black、工作流 YAML 解析与 `git diff --check` 通过。本轮未新增或修改测试。
   - 未验证：没有重跑 GitHub Actions，也没有在本机执行真实 Epic 登录与领取流程；`camoufox fetch` 需要访问 GitHub releases，未在本地实际下载 beta.36 构建，因此「0.5.8 + 固定构建能跑通完整领取」仍待云端一次真实运行确认。另外 0.5 的 `fetch` 会清理不兼容的旧数据目录，CI 是全新 runner 不受影响，本机或自托管环境首次升级会重新下载浏览器。
+
+### 2026-10-08 定位 Epic 登录失败根因（Epic 服务端拒绝 hCaptcha token），并新增 Clash 订阅代理桥
+
+- 现象：
+  - camoufox 启动崩溃修复合并后（run 37748746863），浏览器正常启动、hCaptcha 正常出题，但登录仍卡死：`_await_login_outcome` 超时 ×5，`Epic Games authentication failed after 5 attempts`。
+  - 5 张登录页截图（artifact `epic-screenshots-37748746863`）状态完全一致：`Incorrect response. Please refresh the page.`，停在 email 输入步，每次带新的 error ID。
+- 根因判断：
+  - runtime.log 中 9 次挑战有 5 次 `Challenge success`。核对上游 `hcaptcha_challenger/agent/challenger.py:936`，该日志只在 hCaptcha 自身 `/checkcaptcha/` 返回 `pass: true` 时输出，即 **hCaptcha 已放行 5 次**，解题环节不是瓶颈。
+  - 但 Epic 页面仍报 CAPTCHA 验证失败并把表单重置回 email 步，说明 token 在 **Epic 站点侧校验**被拒。代码里 `_on_response_anything()` 只在 `/id/api/login` 返回 `errorCode` 时落日志，本次该响应不含 `errorCode`，所以日志没有任何 `POST` 行。
+  - 上游 PR #32（Elykia093，2026-10-05）独立复现并明确写出错误码 **Epic `captcha_invalid`**；Issue #30（另一 Fork，09-26）症状相同。多个互不相关的 Fork 自 2026-09 中旬起集体失败，指向环境而非代码。
+  - 排除 frame guard：分支 `experiment/disable-frame-guard`（`EPIC_FRAME_GUARD=0`，guard 完全不加载）跑 run 37757937210，失败模式与 master 完全一致（5 次 `Challenge success`、5 次超时、同样截图）。此外已核实 Playwright `_transport.py:126` 将 driver stderr 继承到进程 fd，guard 触发时必定会在日志留下 `[epic] Ignored late Firefox navigation`，而所有历史日志中该行出现 0 次。实验分支已删除。
+  - 结论：**Epic 服务端拒绝 GitHub Actions 机房出口 IP 产生的 hCaptcha token，不是本仓库代码缺陷。** 这也解释了 09-03 成功、09-10 起连续失败——两次用的浏览器构建相同（`v152.0.4-beta.30`）、代码仅差 frame guard，真正漂移的是 runner 出口 IP 的信誉。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/README.md`
+  - `README.en.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - workflow 新增 `Resolve browser proxy` 与 `Set up local proxy bridge` 两步，代理来源按优先级解析：显式 `BROWSER_PROXY` Secret 优先，其次 `PROXY_SUBSCRIPTION`（Clash 订阅），都未配置则维持原机房直连。`BROWSER_PROXY` 改由这两步写入 `$GITHUB_ENV`，不再在 run 步骤里硬编码引用 Secret，避免空字符串被 `pydantic` 解析成非 `None`。
+  - 订阅桥接用 [mihomo](https://github.com/MetaCubeX/mihomo)（clash.meta 内核）在 runner 本地把订阅转成 `mixed-port 127.0.0.1:7890`。订阅里的 `vmess`/`vless`/`trojan`/`hysteria2` 是私有协议，浏览器无法直连，因此订阅链接不能直接填进 `BROWSER_PROXY`，必须经过这层转换。配置为 `mode: rule` + 单条 `MATCH,PROXY`，`url-test` 自动选最快节点，`proxy-provider` 的 `filter` 支持用仓库 Variable `PROXY_NODE_FILTER`（正则匹配节点名）只保留住宅/家宽节点。
+  - 健康检查通过后才写入 `BROWSER_PROXY`；mihomo 版本获取失败、二进制下载失败或端口未能就绪时，打 `::warning::` 并 `exit 0`，让本次运行回退到无代理直连，而不是带着死代理硬跑，也避免临时的 GitHub API 抖动让整周领取直接失败。
+  - 新增 always-run 的 `Report egress IP` 步骤，把直连与走代理两个出口的 IP 和归属组织写入 job summary，用于判断订阅节点是不是住宅出口：`org` 是 `Alibaba`/`Tencent`/`Hetzner`/`OVH` 这类机房则对 hCaptcha 风控没有帮助。
+  - 本地验证：workflow YAML 解析为 18 步；`Resolve browser proxy` 与 `Set up local proxy bridge` 的 run 块经 `textwrap.dedent` 还原后 `bash -n` 语法通过；`grep -oP` 换成 POSIX `sed` 以摆脱对 GNU grep 的依赖；mihomo `v1.19.32` 实测配置 schema（`proxy-providers` + `filter` + `url-test` 配 `use` + 单条 `MATCH` 规则）全部被接受，日志输出 `Initial configuration complete` 与 `Mixed(http+socks) proxy listening at: 127.0.0.1:7899`，且 `MATCH`-only 规则不触发 geoip 下载；订阅 URL 与节点过滤正则经占位符替换写入后无残留，含 `&` 的订阅链接不会被 shell 破坏。
+  - 未验证：没有配置真实订阅跑过完整 workflow，住宅节点对 hCaptcha 通过率的实际收益待云端一次真实运行确认。`url-test` 默认取最快节点，如果订阅里同时有机房和住宅节点，必须配 `PROXY_NODE_FILTER`，否则大概率仍选中机房节点、等于没换。

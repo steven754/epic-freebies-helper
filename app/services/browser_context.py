@@ -86,7 +86,9 @@ def _browser_proxy_options() -> dict[str, str] | None:
 
 
 def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None) -> dict:
-    from browserforge.fingerprints import Screen
+    # Camoufox >= 0.5 ships its own Screen (same four fields) and no longer
+    # depends on browserforge, so take the bound from the pinned package itself.
+    from camoufox.fingerprints import Screen
 
     screen = Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920)
     firefox_user_prefs = {"network.dns.disableIPv6": True, "network.trr.mode": 5}
@@ -140,6 +142,13 @@ def _is_camoufox_bootstrap_error(err: Exception) -> bool:
             "rate limit exceeded",
             "profile was last used with a newer version",
             "browsertype.launch_persistent_context: target page, context or browser has been closed",
+            # The installed browser build and the pinned Python package disagree
+            # about the fingerprint property set: camoufox validates every key it
+            # is about to inject against the build's own properties.json, so an
+            # upstream build that drops a property kills the launch before any
+            # page exists. Playwright Firefox is unaffected and can still collect.
+            "unknown property",
+            "invalid type for property",
         )
     )
 

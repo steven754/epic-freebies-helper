@@ -18,8 +18,9 @@ The workflow runs the following steps on a GitHub-hosted runner:
 3. Install system dependencies.
 4. Run `uv sync` to install Python dependencies.
 5. Download Camoufox browser assets.
-6. Install Playwright Firefox as a browser fallback.
-7. Run `uv run app/deploy.py` inside `xvfb`.
+6. Print the Camoufox build that was actually installed, so a Python package / browser binary mismatch is visible at a glance.
+7. Install Playwright Firefox as a browser fallback.
+8. Run `uv run app/deploy.py` inside `xvfb`.
 
 The workflow is triggered by GitHub `schedule` and `workflow_dispatch`. APScheduler inside the repository is disabled in this mode to avoid duplicate scheduling.
 

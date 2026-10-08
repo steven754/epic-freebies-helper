@@ -55,6 +55,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: uv run camoufox fetch
 
+      # 记录实际安装的浏览器构建版本。Camoufox 0.5+ 会安装 Python 包自带的
+      # browser-pin，这一步用来确认装到的确实是配套构建，而不是别的版本。
+      - name: Report Camoufox build
+        if: always()
+        continue-on-error: true
+        env:
+          NO_COLOR: "1"
+        run: |
+          {
+            echo "## Camoufox build"
+            echo '```'
+            uv run camoufox version 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install Playwright Firefox fallback
         run: uv run playwright install firefox
 

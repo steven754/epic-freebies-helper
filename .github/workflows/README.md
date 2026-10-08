@@ -18,8 +18,9 @@
 3. 安装系统依赖。
 4. 执行 `uv sync` 安装 Python 依赖。
 5. 下载 Camoufox 浏览器资源。
-6. 安装 Playwright Firefox 作为浏览器回退方案。
-7. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
+6. 打印实际安装的 Camoufox 构建版本，便于判断 Python 包与浏览器二进制是否配套。
+7. 安装 Playwright Firefox 作为浏览器回退方案。
+8. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
 
 它默认由 GitHub 的 `schedule` 和 `workflow_dispatch` 触发，仓库内的 APScheduler 会被关闭，避免重复调度。
 

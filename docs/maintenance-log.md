@@ -1414,3 +1414,29 @@
   - 限流仍先发送包含失败原因的摘要，再返回 `rate_limited` 正常结束；不会把限流记为领取成功，其他领取异常仍保持失败。未改动登录、hCaptcha、浏览器或 checkout 业务逻辑，保留 `master` 的 `70354be` 浏览器修复。
   - 对最新 PR 代码完成静态复审，并核对 WXPush 上游 `/wxsend` 响应协议；Ruff、Black、Python 语法、工作流 YAML 和 `git diff --check` 检查通过。
   - 按仓库规则，本轮未执行测试或真实微信投递。新增文件包含 29 个测试定义，但仍缺少发送异常、双渠道调度及限流返回值的集成回归覆盖；不能将此前浏览器修复的 70 项测试结果视为本 PR 的验证结果。
+
+### 2026-10-08 修复 Camoufox 浏览器构建与 Python 包属性表错配导致的启动失败（同上游 Issue #30）
+
+- 现象：
+  - 定时任务在启动浏览器阶段直接失败，`app/volumes/logs/error.log` 只有一条 `camoufox.exceptions.UnknownProperty: Unknown property navigator.appCodeName in config`，登录和领取流程完全没有开始，job 以非零退出。
+  - 2026-10-02 的运行（run 36920925792）稳定复现该报错，落点固定在 `app/services/browser_context.py:176` → `camoufox/utils.py` 的 `validate_config()`。
+- 根因判断：
+  - `uv.lock` 锁定 Python 包 `camoufox 0.4.11`，其 `browserforge.yml` 会把指纹字段 `appCodeName` 映射成配置键 `navigator.appCodeName`，每次启动都会写入。
+  - 校验用的属性白名单 `properties.json` 不在 Python 包里，而是从**已下载的浏览器构建目录**读取（`get_path("properties.json")`）；而 0.4.11 的 `camoufox fetch` 没有版本参数，每次都拉当时的最新 release。两端的版本由两个独立节奏决定，是结构性缺陷。
+  - 上游 `daijro/camoufox` 构建白名单在此期间被裁剪：`v135.0.1-beta.24` 为 105 项（含 `appCodeName`），`v156.0.1-beta.32` / `beta.33` 仅 82 项（缺少 `navigator.appCodeName`、`navigator.appName`、`navigator.product`、`screen.pageXOffset`、`screen.pageYOffset`），`v156.0.1-beta.36` 恢复到 132 项。本次运行正好落在 beta.33/34 窗口，`appCodeName` 是校验时按字典顺序第一个命中的缺失键，因此报错只提到它。
+  - 放大问题的是降级判定：项目已为 Camoufox 失败准备了 Playwright Firefox 回退，但 `_is_camoufox_bootstrap_error()` 的标记只覆盖「未安装 / 下载限流 / profile 版本过新」，属性表错配不在其中，于是直接抛出，回退路径没有生效。
+- 改动文件：
+  - `app/services/browser_context.py`
+  - `pyproject.toml`
+  - `uv.lock`
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/README.md`
+  - `.github/workflows/README.en.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 依赖改为显式声明 `camoufox[geoip]>=0.5.8,<0.6`。0.5 起每个发布包用 `browser-pin.json` 标记自己配套的浏览器构建，`camoufox fetch` 默认只安装该构建（0.5.8 固定 `v156.0.1-beta.36`），从机制上消除「新浏览器配旧 Python 包」，不再依赖运气。
+  - 0.5 已不再依赖 browserforge，因此 `_camoufox_launch_options()` 的屏幕约束改从 `camoufox.fingerprints.Screen` 取（同样是 `min/max_width`、`min/max_height` 四个字段，语义不变），并移除 `browserforge>=1.2.4` 直接依赖。`uv lock` 一并移除了只服务于它的 `browserforge`、`apify-fingerprint-datapoints`、`aiohttp` 等包，新增 `fpgen`、`rich-click`、`inquirer`、`maxminddb` 等 camoufox 0.5 依赖；`hcaptcha-challenger 0.19.0` 声明的是 `camoufox[geoip]>=0.4.11`，允许该升级，且其代码内没有任何 camoufox 引用，升级不涉及打码适配层。
+  - `_is_camoufox_bootstrap_error()` 增加 `unknown property` 与 `invalid type for property` 两个标记。即使下次属性表再错配（或类型校验失败），也会降级为 Playwright Firefox 继续领取，而不是让整个 job 失败；无关业务异常仍不会被误判为可降级。
+  - workflow 增加 always-run 的 `Report Camoufox build` 步骤，把 `camoufox version` 写进 job summary，下次再出问题可直接看到实际使用的浏览器构建版本，无需再从日志反推。
+  - 本地验证：`uv lock` 解析 108 个包，`camoufox 0.5.8` / `playwright 1.53.0`（满足 camoufox 0.5.8 的 `<1.63` 上限）/ `maxminddb 2.7.0`；`uv sync` 安装成功；`_camoufox_launch_options()` 产出的屏幕对象类型为 `camoufox.fingerprints.Screen`；降级判定对 `UnknownProperty`、`InvalidPropertyType` 及原有标记均返回 True，对无关 `ValueError` 返回 False；`scripts/check_hcaptcha_contract.py` 通过；`pytest` 为 `97 passed, 2 skipped`；Ruff、Black、工作流 YAML 解析与 `git diff --check` 通过。本轮未新增或修改测试。
+  - 未验证：没有重跑 GitHub Actions，也没有在本机执行真实 Epic 登录与领取流程；`camoufox fetch` 需要访问 GitHub releases，未在本地实际下载 beta.36 构建，因此「0.5.8 + 固定构建能跑通完整领取」仍待云端一次真实运行确认。另外 0.5 的 `fetch` 会清理不兼容的旧数据目录，CI 是全新 runner 不受影响，本机或自托管环境首次升级会重新下载浏览器。

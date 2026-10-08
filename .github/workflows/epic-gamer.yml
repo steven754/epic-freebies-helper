@@ -73,6 +73,123 @@ jobs:
       - name: Install Playwright Firefox fallback
         run: uv run playwright install firefox
 
+      # 可选：直接配置了一条具体代理地址（http/socks5）时原样透传给浏览器。
+      # 只把非空值写进 GITHUB_ENV，避免空字符串被 pydantic 解析成非 None。
+      - name: Resolve browser proxy
+        if: ${{ secrets.BROWSER_PROXY != '' }}
+        env:
+          DIRECT_PROXY: ${{ secrets.BROWSER_PROXY }}
+        run: echo "BROWSER_PROXY=$DIRECT_PROXY" >> "$GITHUB_ENV"
+
+      # 可选：配置了 PROXY_SUBSCRIPTION（Clash 订阅链接）时，在 runner 本地起一个
+      # mihomo(clash.meta) 把订阅转成本地 http/socks5 混合端口。订阅里的
+      # vmess/vless/trojan/hysteria2 等私有协议浏览器无法直连，必须经过这一层转换。
+      # 订阅里如果同时有机房和住宅节点，用仓库变量 PROXY_NODE_FILTER（正则）筛选，
+      # 默认 .*(取最快)。机房节点对 hCaptcha 风控没有帮助，只有住宅/家宽出口才有意义。
+      - name: Set up local proxy bridge
+        if: ${{ secrets.PROXY_SUBSCRIPTION != '' && secrets.BROWSER_PROXY == '' }}
+        env:
+          SUBSCRIPTION: ${{ secrets.PROXY_SUBSCRIPTION }}
+          NODE_FILTER: ${{ vars.PROXY_NODE_FILTER || '.*' }}
+        run: |
+          set -euo pipefail
+          WORK=/tmp/mihomo
+          mkdir -p "$WORK/providers"
+          VERSION=$(curl -sfL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+          if [ -z "${VERSION:-}" ]; then
+            echo "::warning::无法获取 mihomo 版本，本次运行将不使用代理（机房 IP 直连）"
+            exit 0
+          fi
+          echo "mihomo version: $VERSION"
+          # compatible 构建面向 GOAMD64=v1，任何 x86_64 runner 都能跑；个别版本缺这个产物时退回普通构建。
+          if ! curl -sfL "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-compatible-${VERSION}.gz" -o "$WORK/mihomo.gz" \
+            && ! curl -sfL "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz" -o "$WORK/mihomo.gz"; then
+            echo "::warning::无法下载 mihomo，本次运行将不使用代理（机房 IP 直连）"
+            exit 0
+          fi
+          gunzip -f "$WORK/mihomo.gz"
+          chmod +x "$WORK/mihomo"
+
+          cat > "$WORK/config.yaml" <<'YAML'
+          mixed-port: 7890
+          allow-lan: false
+          mode: rule
+          log-level: info
+          ipv6: false
+          proxy-providers:
+            sub:
+              type: http
+              url: "__SUBSCRIPTION__"
+              interval: 86400
+              path: ./providers/sub.yaml
+              filter: "__NODE_FILTER__"
+              health-check:
+                enable: true
+                url: https://www.gstatic.com/generate_204
+                interval: 300
+          proxy-groups:
+            - name: PROXY
+              type: url-test
+              use: [sub]
+              url: https://www.gstatic.com/generate_204
+              interval: 300
+              tolerance: 50
+              lazy: true
+          rules:
+            - MATCH,PROXY
+          YAML
+          # 订阅 URL / 节点过滤正则通过占位符替换写入，避免 shell 展开破坏 YAML 缩进
+          python3 -c '
+          import sys
+          path, subscription, node_filter = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = open(path, encoding="utf-8").read()
+          text = text.replace("__SUBSCRIPTION__", subscription).replace(
+              "__NODE_FILTER__", node_filter or ".*"
+          )
+          open(path, "w", encoding="utf-8").write(text)
+          ' "$WORK/config.yaml" "$SUBSCRIPTION" "$NODE_FILTER"
+
+          nohup "$WORK/mihomo" -d "$WORK" -f "$WORK/config.yaml" > "$WORK/mihomo.log" 2>&1 &
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -sf --max-time 3 -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204 -o /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -eq 1 ]; then
+            echo "BROWSER_PROXY=http://127.0.0.1:7890" >> "$GITHUB_ENV"
+            echo "本地代理桥就绪 | 127.0.0.1:7890"
+          else
+            # 桥没起来就不写 BROWSER_PROXY，让任务回退到无代理直连，而不是带一个死代理硬跑
+            echo "::warning::本地代理桥未能就绪，本次运行将不使用代理（机房 IP 直连）"
+            echo "--- mihomo.log ---"
+            tail -40 "$WORK/mihomo.log" || true
+          fi
+
+      # 把出口 IP 和归属组织打进 job summary：一眼判断订阅节点是不是住宅/家宽出口。
+      # org 是 Alibaba/Tencent/Hetzner/OVH 这类机房，对 hCaptcha 风控基本没有帮助。
+      - name: Report egress IP
+        if: always()
+        continue-on-error: true
+        env:
+          NO_COLOR: "1"
+        run: |
+          {
+            echo "## Egress IP"
+            echo '```'
+            echo "--- direct (GitHub runner) ---"
+            curl -s --max-time 10 https://ipinfo.io/json | python3 -m json.tool 2>/dev/null \
+              || echo "(lookup failed)"
+            echo
+            echo "--- via local bridge 127.0.0.1:7890 ---"
+            curl -s --max-time 15 -x http://127.0.0.1:7890 https://ipinfo.io/json | python3 -m json.tool 2>/dev/null \
+              || echo "(bridge not ready or lookup failed)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run Epic Awesome Gamer
         env:
           EPIC_EMAIL: ${{ secrets.EPIC_EMAIL }}
@@ -98,7 +215,8 @@ jobs:
           SPATIAL_POINT_REASONER_MODEL: ${{ vars.SPATIAL_POINT_REASONER_MODEL || secrets.SPATIAL_POINT_REASONER_MODEL }}
           SPATIAL_PATH_REASONER_MODEL: ${{ vars.SPATIAL_PATH_REASONER_MODEL || secrets.SPATIAL_PATH_REASONER_MODEL }}
           BROWSER_BACKEND: auto
-          BROWSER_PROXY: ${{ secrets.BROWSER_PROXY }}
+          # BROWSER_PROXY 由前面的 "Resolve browser proxy" / "Set up local proxy bridge"
+          # 两步按优先级写入 GITHUB_ENV：显式 secret 优先，其次订阅桥，都没配则不设。
           HEADLESS: virtual
           DISABLE_BEZIER_TRAJECTORY: false
           # 在 Actions 中我们依靠 GitHub 的 cron 触发，所以关闭内部调度器

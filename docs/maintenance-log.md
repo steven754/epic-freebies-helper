@@ -1483,3 +1483,5 @@
   - 该步骤只打印「已配置 / 未配置」，不打印 Secret 值本身，避免凭证进入作业日志。
   - 本地验证：`actionlint 1.7.12` 对该文件 0 parse error、0 error；工作流解析为 19 步，两个条件步骤的 `if` 表达式分别为 `env.HAS_DIRECT_PROXY == '1'` 与 `env.HAS_SUBSCRIPTION == '1' && env.HAS_DIRECT_PROXY != '1'`；新增步骤的 run 块 `bash -n` 通过。
   - 流程改进：后续改 workflow 必须跑 `actionlint`，不能只靠 YAML 解析。`shellcheck` 本机未安装，actionlint 的 shellcheck 与 pyflakes 规则被跳过（日志有明示），run 块目前只覆盖到语法层面。
+
+- 补充（同日）：`Report egress IP` 改为 `tee -a "$GITHUB_STEP_SUMMARY"`，让出口 IP 同时落在作业日志里。此前只写 `$GITHUB_STEP_SUMMARY`，而 job summary 无法从日志或 artifact 里读到（check-runs API 的 `output.summary` 也要等作业结束才发布），排查时只能靠网页肉眼查看。

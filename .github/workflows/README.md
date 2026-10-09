@@ -93,20 +93,36 @@ Epic 会在服务端校验 hCaptcha token。GitHub Hosted Runner 用的是云机
 **方式二：用 Clash 订阅链接**，填进 `PROXY_SUBSCRIPTION`。工作流会：
 
 1. 下载 [mihomo](https://github.com/MetaCubeX/mihomo)（clash.meta 内核）
-2. 以订阅为 `proxy-provider` 生成配置，`url-test` 自动选最快节点
-3. 等订阅真正加载出节点，然后**比对经代理的出口 IP 与直连 IP**
-4. 只有两者**不同**才写入 `BROWSER_PROXY`
-5. 在 job summary 和作业日志里输出 **Egress IP**（直连 + 代理两个出口）
+2. 以订阅为 `proxy-provider` 生成配置，代理组用 `select`（手动选点不会被测速周期覆盖）
+3. 等 `proxy-provider` 真正拉到节点
+4. **逐个节点实测出口 IP + ASN 归属**，按 `住宅 > 未知 > 机房` 挑一个并选中
+5. 比对经代理的出口 IP 与直连 IP，只有两者**不同**才写入 `BROWSER_PROXY`
+6. 在 job summary 里输出完整实测表（类型 / 节点名 / 出口 IP / ASN 组织 / 耗时）
 
-第二步的判据很关键：mihomo 在代理组为空或全部节点不可用时会**让请求直接出去**，这时对本地端口做健康检查照样返回 200。所以"端口能连"不等于"代理生效"，必须比对出口 IP。如果出口没变，工作流会打 `::warning::`、打印代理组节点数与 mihomo 日志，并**放弃使用代理**——因为一个等于直连的代理只会改变浏览器网络指纹、让 hCaptcha 更难，却拿不到换 IP 的任何好处。
+全部逻辑在 [`.github/scripts/proxy_bridge.py`](../scripts/proxy_bridge.py)，可以本地自测：
 
-三个注意点：
+```bash
+python3 .github/scripts/proxy_bridge.py --self-test
+```
 
-- **订阅必须是 Clash 格式。** `proxy-provider` 只认 Clash YAML。如果你填的是「通用订阅 / base64 节点串」，mihomo 会解析不出任何节点（日志里会出现 `代理组可用节点数: 0`），需要去后台换成 Clash 订阅链接。
+#### 两个"看起来成功其实没生效"的坑
+
+这两点都踩过，所以判据写得比较保守：
+
+1. **"端口能连"不等于"代理生效"。** mihomo 在代理组为空或全部节点不可用时会**让请求直接出去**，这时对 `127.0.0.1:7890` 做健康检查照样返回 200。
+2. **"节点数 > 0" 也不是有效判据。** mihomo 会给**空分组**塞一个内置兜底项 `COMPATIBLE`（API 里同时能看到 `emptyFallback: "COMPATIBLE"`），所以代理组 `all` 数组非空并不代表订阅加载成功。脚本因此改成读 `proxy-provider` 自身的节点列表，并把 `DIRECT` / `REJECT` / `PASS` / `COMPATIBLE` 这类内置名排除掉。
+
+另外，如果 mihomo 的 `7890` 端口没绑上（被占用），进程照样活着，只是所有"经代理"的请求都发到了别处；脚本会检测日志里的 `Mixed(http+socks) server error` 并直接放弃使用代理。
+
+最终兜底判据只有一个：**出口 IP 必须和直连不同**。出口没变时工作流会打 `::warning::`、打印节点数、provider 报错和 mihomo 日志，并**放弃使用代理**——因为一个等于直连的代理只会改变浏览器网络指纹、让 hCaptcha 更难，却拿不到换 IP 的任何好处。
+
+#### 三个注意点
+
+- **订阅必须是 Clash 格式。** `proxy-provider` 只认 Clash YAML。如果你填的是「通用订阅 / base64 节点串」，mihomo 会解析不出任何节点（日志里会出现 `订阅节点数: 0`），需要去后台换成 Clash 订阅链接。
 - 订阅里的 `vmess` / `vless` / `trojan` / `hysteria2` 等私有协议浏览器无法直连，必须经过这层转换，所以**订阅链接不能直接填进 `BROWSER_PROXY`**。
-- **机房落地节点对 hCaptcha 风控没有帮助。** 如果订阅里同时有住宅和机房节点，配置仓库 Variable `PROXY_NODE_FILTER`（正则，匹配节点名）只保留住宅节点，例如 `家宽|住宅|ISP|Residential`。不配则默认 `.*`（取全部节点里最快的）。
+- **机房落地节点对 hCaptcha 风控没有帮助。** 脚本会按出口 ASN 自动避开机房，但如果订阅里**一个住宅节点都没有**，它会打警告说"选中的仍是机房节点"。这种情况换节点没用，需要换订阅，或者配仓库 Variable `PROXY_NODE_FILTER`（正则，匹配节点名）来限定候选，例如 `家宽|住宅|ISP|Residential`。不配则默认 `.*`（全部节点参与实测）。
 
-判断出口到底是不是住宅，看 job summary 或日志里的 **Egress IP** 段：`org` 字段是 `Alibaba` / `Tencent` / `Hetzner` / `OVH` / `DigitalOcean` 这类就是机房；是 `China Telecom` / `Comcast` / `Chunghwa Telecom` 这类运营商才是家宽。
+判断出口到底是不是住宅，看 job summary 里的**代理出口实测**表，或日志里的 `Egress IP` 段：`org` 字段是 `Microsoft` / `Amazon` / `Alibaba` / `Tencent` / `Hetzner` / `OVH` / `DigitalOcean` 这类就是机房；是 `China Telecom` / `Comcast` / `Chunghwa Telecom` 这类运营商才是家宽。
 
 
 

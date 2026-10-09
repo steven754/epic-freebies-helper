@@ -106,131 +106,27 @@ jobs:
       # 可选：配置了 PROXY_SUBSCRIPTION（Clash 订阅链接）时，在 runner 本地起一个
       # mihomo(clash.meta) 把订阅转成本地 http/socks5 混合端口。订阅里的
       # vmess/vless/trojan/hysteria2 等私有协议浏览器无法直连，必须经过这一层转换。
-      # 订阅里如果同时有机房和住宅节点，用仓库变量 PROXY_NODE_FILTER（正则）筛选，
-      # 默认 .*(取最快)。机房节点对 hCaptcha 风控没有帮助，只有住宅/家宽出口才有意义。
+      #
+      # 关键点：不是"连上就算成功"。桥只写 BROWSER_PROXY 到 GITHUB_ENV 的前提是
+      # 出口 IP 与直连不同；并且会逐个节点实测出口 ASN，优先挑住宅/家宽出口。
+      # 机场默认的"最低延迟"节点在 Actions 上几乎总是落到 AS8075/Azure 这类机房
+      # 网段，对 hCaptcha 与 Epic 的风控毫无帮助。逻辑都在下面的脚本里，便于本地自测：
+      #   python3 .github/scripts/proxy_bridge.py --self-test
       - name: Set up local proxy bridge
         if: env.HAS_SUBSCRIPTION == '1' && env.HAS_DIRECT_PROXY != '1'
+        continue-on-error: true
         env:
           SUBSCRIPTION: ${{ secrets.PROXY_SUBSCRIPTION }}
-          NODE_FILTER: ${{ vars.PROXY_NODE_FILTER || '.*' }}
+          NODE_FILTER: ${{ vars.PROXY_NODE_FILTER || '' }}
         run: |
           set -euo pipefail
-          WORK=/tmp/mihomo
-          mkdir -p "$WORK/providers"
-          VERSION=$(curl -sfL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
-          if [ -z "${VERSION:-}" ]; then
-            echo "::warning::无法获取 mihomo 版本，本次运行将不使用代理（机房 IP 直连）"
-            exit 0
-          fi
-          echo "mihomo version: $VERSION"
-          # compatible 构建面向 GOAMD64=v1，任何 x86_64 runner 都能跑；个别版本缺这个产物时退回普通构建。
-          if ! curl -sfL "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-compatible-${VERSION}.gz" -o "$WORK/mihomo.gz" \
-            && ! curl -sfL "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz" -o "$WORK/mihomo.gz"; then
-            echo "::warning::无法下载 mihomo，本次运行将不使用代理（机房 IP 直连）"
-            exit 0
-          fi
-          gunzip -f "$WORK/mihomo.gz"
-          chmod +x "$WORK/mihomo"
-
-          cat > "$WORK/config.yaml" <<'YAML'
-          mixed-port: 7890
-          allow-lan: false
-          mode: rule
-          log-level: info
-          ipv6: false
-          external-controller: 127.0.0.1:9090
-          proxy-providers:
-            sub:
-              type: http
-              url: "__SUBSCRIPTION__"
-              interval: 86400
-              path: ./providers/sub.yaml
-              filter: "__NODE_FILTER__"
-              health-check:
-                enable: true
-                url: https://www.gstatic.com/generate_204
-                interval: 300
-          proxy-groups:
-            - name: PROXY
-              type: url-test
-              use: [sub]
-              url: https://www.gstatic.com/generate_204
-              interval: 300
-              tolerance: 50
-              lazy: true
-          rules:
-            - MATCH,PROXY
-          YAML
-          # 订阅 URL / 节点过滤正则通过占位符替换写入，避免 shell 展开破坏 YAML 缩进
-          python3 -c '
-          import sys
-          path, subscription, node_filter = sys.argv[1], sys.argv[2], sys.argv[3]
-          text = open(path, encoding="utf-8").read()
-          text = text.replace("__SUBSCRIPTION__", subscription).replace(
-              "__NODE_FILTER__", node_filter or ".*"
-          )
-          open(path, "w", encoding="utf-8").write(text)
-          ' "$WORK/config.yaml" "$SUBSCRIPTION" "$NODE_FILTER"
-
-          nohup "$WORK/mihomo" -d "$WORK" -f "$WORK/config.yaml" > "$WORK/mihomo.log" 2>&1 &
-
-          # 1) 等控制端口起来
-          for _ in $(seq 1 30); do
-            if curl -sf --max-time 3 http://127.0.0.1:9090/version -o /dev/null; then
-              break
-            fi
-            sleep 2
-          done
-
-          # 2) 等订阅真正加载出节点。mihomo 在代理组为空时会让请求直接出去，
-          #    此时对 127.0.0.1:7890 的健康检查照样返回 200，所以必须等节点数 > 0。
-          nodes=0
-          for _ in $(seq 1 40); do
-            nodes=$(curl -s --max-time 3 http://127.0.0.1:9090/proxies/PROXY 2>/dev/null \
-              | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("all",[])))' 2>/dev/null \
-              || echo 0)
-            nodes=$(printf '%s' "$nodes" | tr -dc '0-9')
-            nodes=${nodes:-0}
-            if [ "$nodes" -gt 0 ]; then
-              break
-            fi
-            sleep 3
-          done
-          selected=$(curl -s --max-time 3 http://127.0.0.1:9090/proxies/PROXY 2>/dev/null \
-            | python3 -c 'import sys,json;print(json.load(sys.stdin).get("now",""))' 2>/dev/null \
-            || echo "")
-          echo "代理组可用节点数: $nodes | 选中节点: ${selected:-无}"
-
-          # 3) 真正的判据：经代理的出口 IP 必须和直连 IP 不同。
-          direct_ip=$(curl -s --max-time 10 https://ipinfo.io/ip || true)
-          proxy_ip=""
-          for _ in $(seq 1 20); do
-            proxy_ip=$(curl -s --max-time 10 -x http://127.0.0.1:7890 https://ipinfo.io/ip || true)
-            if [ -n "$proxy_ip" ] && [ "$proxy_ip" != "$direct_ip" ]; then
-              break
-            fi
-            sleep 3
-          done
-          direct_ip=$(printf '%s' "$direct_ip" | tr -d '[:space:]')
-          proxy_ip=$(printf '%s' "$proxy_ip" | tr -d '[:space:]')
-
-          if [ -n "$proxy_ip" ] && [ "$proxy_ip" != "$direct_ip" ]; then
-            echo "BROWSER_PROXY=http://127.0.0.1:7890" >> "$GITHUB_ENV"
-            echo "本地代理桥就绪 | 直连=$direct_ip | 代理=$proxy_ip | 节点=${selected:-未知}"
-          else
-            # 出口没变说明订阅节点没生效（节点组为空 / 订阅拉取失败 / filter 把所有节点筛掉了）。
-            # 这种情况绝不写 BROWSER_PROXY：带着一个等于直连的代理只会改变浏览器网络指纹，
-            # 让 hCaptcha 更难，却拿不到换 IP 的任何好处。
-            echo "::warning::代理出口与直连相同（${proxy_ip:-无响应}），订阅节点未生效，本次运行不使用代理"
-            echo "代理组可用节点数: $nodes | 选中节点: ${selected:-无}"
-            echo "--- mihomo.log (tail 60) ---"
-            tail -60 "$WORK/mihomo.log" || true
-          fi
+          python3 .github/scripts/proxy_bridge.py
 
       # 把出口 IP 和归属组织打进 job summary：一眼判断订阅节点是不是住宅/家宽出口。
       # org 是 Alibaba/Tencent/Hetzner/OVH 这类机房，对 hCaptcha 风控基本没有帮助。
       # tee 让同样的内容也落在作业日志里，否则 summary 只能从网页看、grep 不到。
+      # 这里同时把代理桥自己的结论（有没有写 BROWSER_PROXY、选了哪个节点）复述一遍，
+      # 便于在作业级别直接确认，而不用回去翻上一个步骤的日志。
       - name: Report egress IP
         if: always()
         continue-on-error: true
@@ -239,6 +135,13 @@ jobs:
         run: |
           {
             echo "## Egress IP"
+            if [ -n "${BROWSER_PROXY:-}" ]; then
+              echo
+              echo "代理桥已生效：\`BROWSER_PROXY=$BROWSER_PROXY\`（选中节点 \`${PROXY_PICKED_NODE:-未知}\`）"
+            else
+              echo
+              echo "本次运行**未使用代理**（未配置，或代理桥自检未通过）。"
+            fi
             echo '```'
             echo "--- direct (GitHub runner) ---"
             curl -s --max-time 10 https://ipinfo.io/json | python3 -m json.tool 2>/dev/null \

@@ -1506,3 +1506,36 @@
   - 失败分支额外 `tail -60 mihomo.log`，把订阅拉取/解析错误直接暴露在作业日志里。
   - 本地验证：用一组全是死节点的 `type: file` provider 复现，`nodes=2`、`direct_ip == proxy_ip == 110.191.179.246`，新判据正确判定"代理未生效"，而旧判据（仅 204 健康检查）返回通过——两个方向都得到确认。另 `actionlint 1.7.12` 无告警，`bash -n` 通过。
   - 未验证：订阅本身为什么没产出可用节点尚未确定，需要看下一次运行输出的节点数与 `mihomo.log`。同样未经证实的是"代理出口 IP 变更为住宅后登录能否通过"。
+
+### 2026-10-09 代理桥重写为独立脚本，并修掉两个"看起来成功其实没生效"的坑
+
+- 现象：
+  - run 37875210160 的 `Set up local proxy bridge` 报 success，日志显示 `本地代理桥就绪 | 直连=52.154.20.50 | 代理=20.64.168.123 | 节点=COMPATIBLE`，但经代理的出口 `20.64.168.123` 查下来是 Moses Lake, WA 的 **AS8075 Microsoft Corporation**，与 runner 直连 IP `52.154.20.50` 同属一个云厂商网段——换了 IP 却仍是机房出口。
+  - 同一份日志里 `代理组可用节点数: 38 | 选中节点: COMPATIBLE`。节点名 `COMPATIBLE` 一开始被当作"订阅里的一个节点"，实际不是。
+- 根因判断（两个独立的假阳性，都用本地真实 mihomo 复现过）：
+  - **`COMPATIBLE` 不是订阅节点，而是空分组的内置兜底项。** mihomo `/proxies/<group>` 的返回里同时有 `"emptyFallback": "COMPATIBLE"`，且内置代理集合为 `{COMPATIBLE, DIRECT, GLOBAL, PASS, PASS-RULE, REJECT, REJECT-DROP}`。所以**代理组 `all` 数组非空完全不能证明订阅加载成功**——上一轮新增的"节点数 > 0"判据本身也是假阳性。本地用 31 个节点的订阅实测：provider 拉取失败时 `all` 只有 1 项（`COMPATIBLE`），修复后正确读出 31 项。
+  - **`url-test` + `lazy: true` 未测速前 `now` 也是 `COMPATIBLE`**，所以日志里的"选中节点"同样不可信。
+  - **provider 拉取失败时 mihomo 不退出**，只是让分组空着，配合上面的兜底项就会一路"看起来正常"。
+  - 附带：`/group/<name>/delay` 在**全部节点不可用**时返回 HTTP 504 `{"message":"get delay: all proxies timeout"}`，而不是"每个节点 delay=0"的字典；直接 `except Exception` 兜底会把它误判成接口故障。
+- 改动文件：
+  - `.github/scripts/proxy_bridge.py`（新增，代理桥逻辑从 YAML 里整体搬出）
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/README.md`
+  - `README.en.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 代理桥改为独立 Python 脚本，workflow 里的步骤只剩 `python3 .github/scripts/proxy_bridge.py`，避免长 run 块在 YAML 缩进里出问题。脚本支持 `--self-test` 离线自检。
+  - **节点就绪判据**改为读 `proxy-provider` 自身（`/providers/proxies/sub` 的 `proxies`），并把 `DIRECT`/`REJECT`/`PASS`/`COMPATIBLE` 等内置名排除；provider 拉取失败时把 `provider sub ... error` 从 `mihomo.log` 里捞出来写进 summary，并**早退**（provider `interval` 是 86400，首次失败当天不会重试，继续等只是白等）。
+  - **选点策略**：先调 `/group/PROXY/delay` 并发测速（URL 用 `ipinfo.io` 而非 `gstatic`，避免被墙造成的误判）把节点分活/死，再逐个切换出口实测真实 egress IP + ASN 组织，按 `住宅 > 未知 > 机房` 排序取延迟最低者，选中后写 `PROXY_PICKED_NODE`。组类型从 `url-test` 改成 `select`，手动选点不会被测速周期覆盖。全死（504）时仍抽前 8 个复核一遍，防止测速失灵误杀可用订阅。
+  - **出口校验**（唯一兜底判据）保持不变：出口 IP 与直连不同才写 `BROWSER_PROXY`；相同则打 `::warning::` 并放弃使用代理。新增两道前置守卫：混合端口没绑上（日志出现 `Mixed(http+socks) server error`）直接放弃，避免把 `BROWSER_PROXY` 指向别的进程；订阅一个节点都拉不到也直接放弃。
+  - 实测失败时选中的仍是机房节点会额外打警告，提示换订阅或用 `PROXY_NODE_FILTER` 限定住宅节点。
+  - 端口改为可由 `MIHOMO_MIXED_PORT` / `MIHOMO_API_PORT` 覆盖（本机 7890 已被占用时做本地测试用）；`MIHOMO_BIN` / `MIHOMO_ASSET` 用于本地复用已下载的二进制。
+  - 二进制下载回到 **curl 为主**（`--retry 2 --connect-timeout 20 --max-time 120`，失败再退 urllib）：相对 urllib，curl 对 302 跳到 `objects.githubusercontent.com` 与截断重试更稳，也是上一轮在 Actions 上验证过能成功的路径。
+  - `Report egress IP` 增加一行结论：有没有写 `BROWSER_PROXY`、选中了哪个节点，作业级别就能确认，不必回翻上一步日志。
+- 本地验证（真实 mihomo `v1.19.32` + 本地 HTTP 订阅 + 31 个真实节点，全部实跑）：
+  - `python3 .github/scripts/proxy_bridge.py --self-test`：分类器 9 个断言、配置转义、选点优先级全部通过（自检曾抓出 `json.dumps` 默认 `ensure_ascii=True` 会把中文正则转成 `\uXXXX`，已改）。
+  - 分支 A（全部节点不可用，31 个节点实测全灭）：正确输出 `分组测速（并发）：全部节点超时` → 复核前 8 个 → `::warning::所有节点实测均失败` → **不写 `BROWSER_PROXY`**。
+  - 分支 B（节点活着但出口 IP 与直连相同，用本机 CONNECT 代理构造）：正确输出 `订阅节点数: 1`、`[ 1] 住宅 1057ms 110.191.179.246 AS4134 CHINANET BACKBONE`、`桥是否生效: 否`，summary 表格正确渲染，且确认**没有**写入 `BROWSER_PROXY`。
+  - `actionlint 1.7.12` 0 告警；工作流解析为 19 步，两个条件步骤的 `if` 仍是 `env.HAS_*`。
+  - 未验证：**"出口确实变了"这一支（写 `BROWSER_PROXY` 的那两行）本轮没能本地复现**——本机沙箱只有一条出口，构造不出"换个 IP 但仍可控"的节点，公开免费代理当时全部不可用。该分支在 run 37875210160 的真实 runner 上曾经走到过（桥报就绪、应用侧 `proxy_enabled=True`），因此只是本地覆盖率缺口，不是未测代码。同样仍未证实的是"换成住宅出口后 Epic 是否就放行"。
+  - 期间发现的与本仓库无关的环境情况：本机 `127.0.0.1:7890` 被一个沙箱外的进程占用（`lsof` 看不到、`kill` 报 `Operation not permitted`），且有 java 进程持续连它——即本机本来就跑着一个代理客户端。这也意味着用户可以在自己的客户端里直接看订阅的节点名，判断有没有住宅节点。

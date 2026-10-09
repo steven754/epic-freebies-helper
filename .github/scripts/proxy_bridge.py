@@ -165,6 +165,24 @@ TIER_LABEL = {
     TIER_DATACENTER: "机房",
 }
 
+# 当订阅里完全没有住宅节点、只能在机房里挑时，超大云厂（Azure/AWS/GCP/Aliyun/
+# Tencent/Oracle 等）被 Epic 风控打得最死——社区与历次运行都观察到它们直接
+# `captcha_invalid`。其它托管/CDN（如 G-Core、小型机房）至少能过验证码、只在会话
+# 阶段被拦。所以机房内部再按"是否被硬封"做二级排序：同延迟下优先选没被硬封的。
+HARD_BLOCKED_HINTS = (
+    "microsoft",
+    "azure",
+    "amazon",
+    "aws",
+    "google",
+    "alibaba",
+    "aliyun",
+    "tencent",
+    "oracle",
+    "akamai",
+    "cloudflare",
+)
+
 
 def _norm_org(s: str) -> str:
     """只去掉分隔符（连字符/点/下划线/空格/&），保留字母与中文，
@@ -566,11 +584,28 @@ def probe_nodes(names: list[str]) -> list[dict]:
     return results
 
 
+def _hard_blocked_penalty(org: str) -> int:
+    """机房节点里，被 Epic 硬封的超大云厂记 1，其它托管/CDN 记 0。"""
+    text = _norm_org(org)
+    for hint in HARD_BLOCKED_HINTS:
+        if _norm_org(hint) in text:
+            return 1
+    return 0
+
+
 def pick(results: list[dict]) -> dict | None:
-    """先看等级（住宅 > 未知 > 机房），同级取延迟最低。"""
+    """先看等级（住宅 > 未知 > 机房），同等级里被硬封的机房往后排，最后取延迟最低。
+
+    这样在"只有机房出口"的订阅里，会优先选 G-Core 这类至少能过验证码的节点，
+    而不是 Azure/AWS 这种直接 captcha_invalid 的——虽然最终都过不了领取，
+    但能少走弯路、也更符合实测表现。
+    """
     if not results:
         return None
-    return sorted(results, key=lambda r: (-r["tier"], r["ms"]))[0]
+    return sorted(
+        results,
+        key=lambda r: (-r["tier"], _hard_blocked_penalty(r.get("org", "")), r["ms"]),
+    )[0]
 
 
 def main() -> int:
@@ -749,6 +784,16 @@ def self_test() -> int:
     )
     assert picked and picked["name"] == "home", picked
     log_line("ok  选点：住宅节点优先级高于低延迟机房节点")
+
+    # 只有机房时，低延迟的 Azure 不应压过被风控较轻的 G-Core（实测 G-Core 至少能过验证码）。
+    picked2 = pick(
+        [
+            {"name": "azure", "tier": TIER_DATACENTER, "ms": 163, "org": "AS8075 Microsoft Corporation"},
+            {"name": "gcore", "tier": TIER_DATACENTER, "ms": 164, "org": "AS199524 G-Core Labs S.A."},
+        ]
+    )
+    assert picked2 and picked2["name"] == "gcore", picked2
+    log_line("ok  选点：机房内优先选未被硬封的节点（G-Core 优于 Azure）")
 
     log_line(f"自检结果：{'全部通过' if failed == 0 else f'{failed} 项失败'}")
     return 1 if failed else 0

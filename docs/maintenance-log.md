@@ -1558,3 +1558,12 @@
   - 代理桥这条链路已经**完全跑通并验证**（egress 变更、hCaptcha 通过、住宅优先选点、机房警告），代码层面没问题。
   - **剩下的卡点不是代码，是订阅质量**：当前订阅只提供 Azure / G-Core 这类机房出口，Epic 对它们做风控，领取不可能成功。要让工作流真正跑通领取，必须换成**含住宅/ISP（家宽）出口**的订阅；若已有，用仓库变量 `PROXY_NODE_FILTER` 指定住宅节点名即可。云厂商/机场节点无论延迟多低都过不了 Epic。
 - 验证：`--self-test` 13 项全过（含 G-Core→机房）；`py_compile` 通过；`actionlint` 未跑但仅改了脚本内字符串与一处正则，YAML 未动。下一步待用户换订阅后再跑一次确认住宅出口能通过 `isloggedin` 这道。
+
+### 2026-10-09（续2）选点回归修正：机房内优先未被硬封的节点（G-Core 优于 Azure）
+
+- 现象/隐患：把 G-Core 正确归为机房（与 Azure 同 tier）后，`pick()` 的二级排序只剩延迟，于是一直最低延迟的 Azure(163ms) 会压过 G-Core(164ms)。而历次运行里 Azure 是直接 `captcha_invalid`（硬封），G-Core 至少能过验证码、只在会话阶段被拦——纠正分类反而让桥去挑"最烂"的机房节点。
+- 改动（同文件 `proxy_bridge.py`）：
+  - 新增 `HARD_BLOCKED_HINTS`（microsoft/azure/amazon/aws/google/alibaba/aliyun/tencent/oracle/akamai/cloudflare），`pick()` 在同等级内按"是否被硬封"做二级排序：未被硬封的机房（如 G-Core、小型托管）排在被硬封的超大云厂之前，最后才比延迟。实测数据下会选 `🇺🇸西美-F(通用)`(G-Core) 而非 `🇺🇸美国-C(通用)`(Azure)。
+  - 补进 self-test 锁定：机房内 G-Core 优于 Azure。
+  - `_hard_blocked_penalty` 对缺 `org` 字段的结果用 `r.get("org","")` 兜底，避免 self-test 里不含 org 的用例 KeyError。
+- 说明：这只是"没有住宅节点时的次优解"，无论挑 Azure 还是 G-Core，云厂商出口都过不了 Epic 领取；真正的出路仍是住宅/ISP 出口。该改动提交后，正在跑的 37881305883 用的是上一版（可能挑到 Azure），下一版才生效。

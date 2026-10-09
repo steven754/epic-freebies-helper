@@ -1592,3 +1592,15 @@
   - 结论：代理桥在「住宅订阅」下端到端正确（拉节点→按 ASN 选住宅→出口确实改变），代码层面已无 bug。
 - 云端缺口（唯一阻塞）：`epic-gamer.yml` 接线已确认正确——`Set up local proxy bridge` 在 `HAS_SUBSCRIPTION==1 && HAS_DIRECT_PROXY!=1` 时运行并写 `BROWSER_PROXY`，`Run Epic Awesome Gamer` 消费该变量；`EPIC_EMAIL/PASSWORD/ACCOUNTS` 等秘钥已接好。当前 `PROXY_SUBSCRIPTION` 是过期 token（401），桥拉不到节点，应用回退机房直连，必卡 `captcha_invalid`/`isloggedin=false`。
 - 下一步（待用户提供）：给云端一个【有效住宅订阅 URL】。优先长期有效的住宅订阅（非 15 分钟 trial），设为 `PROXY_SUBSCRIPTION` 并保留 `PROXY_NODE_FILTER=家宽`，每周四定时任务即自动跑绿。也可临时重发 15 分钟 token 让我立刻触发一次验证。
+
+### 2026-10-09（续5）云端 run 37899495839：桥拉到 52 家宽节点但全超时——根因是缓存节点已过期，非代码/Azure 封锁
+
+- 动作：按用户选择，把缓存的 `sub.yaml`（226 节点/52 家宽，14:32 抓取）临时发到 secret(unlisted) gist，设 `PROXY_SUBSCRIPTION` 为其 raw URL，触发 `epic-gamer.yml` run `37899495839`。
+- 桥在云端的表现（来自 run 日志，关键证据）：
+  - `订阅节点数: 52 | 过滤正则: 家宽` —— gist 投喂 + `家宽` 过滤在 runner 上正确生效，52 个家宽节点都被加载。
+  - `直连出口: 172.210.149.50 AS8075 Microsoft Corporation` —— runner 本身是 Azure 机房 IP。
+  - `分组测速（并发）：全部节点超时` → `##[warning]所有节点实测均失败，本次运行不使用代理` —— 52 个家宽节点在云端**全部连不通**。
+  - 于是 `BROWSER_PROXY: null`，Epic 步骤回退 Azure 直连，hCaptcha 反复 `signal=failure`、登录 `Timed out waiting for Epic login outcome`，run 失败。
+- 根因判定（重要）：**不是代码 bug，也不是 Azure 被住宅供应商封锁**。本地 15:17 实测同批节点 45/52 存活且出口是 HKBN/CTM/SoftBank 住宅；云端 15:32 同批节点全超时，仅相差 ~15 分钟。结合 `sub.yaml` 是 14:32 抓取的缓存、节点寿命约 1 小时，结论是：云端桥运行时这批缓存节点已经过期死亡。gist 投喂的是 14:32 的缓存，节点在云端桥启动时已死（用户原话 token "时效只有 15 分种"指的是抓取链接有效期；节点本身比链接多活约 45 分钟，但到 15:32 已超 1 小时寿命）。
+- 结论：代理桥代码在「住宅订阅」下完全正确（本地端到端已证）；云端失败的唯一原因是**喂进去的节点在桥运行时已过期**。要云端跑绿，必须在桥启动前用【新鲜的、仍在有效期内的住宅节点】投喂——即重发一个新鲜 trial token（我立刻设秘钥并触发，桥在触发后 ~30s 内运行，新鲜节点寿命约 1 小时，足够覆盖领取）或改用节点寿命更长（天级）的住宅订阅作为 `PROXY_SUBSCRIPTION` 做长期自动化。
+- 已按承诺删除临时 gist，关闭凭证暴露窗口。

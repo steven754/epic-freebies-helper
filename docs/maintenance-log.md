@@ -1464,3 +1464,22 @@
   - 新增 always-run 的 `Report egress IP` 步骤，把直连与走代理两个出口的 IP 和归属组织写入 job summary，用于判断订阅节点是不是住宅出口：`org` 是 `Alibaba`/`Tencent`/`Hetzner`/`OVH` 这类机房则对 hCaptcha 风控没有帮助。
   - 本地验证：workflow YAML 解析为 18 步；`Resolve browser proxy` 与 `Set up local proxy bridge` 的 run 块经 `textwrap.dedent` 还原后 `bash -n` 语法通过；`grep -oP` 换成 POSIX `sed` 以摆脱对 GNU grep 的依赖；mihomo `v1.19.32` 实测配置 schema（`proxy-providers` + `filter` + `url-test` 配 `use` + 单条 `MATCH` 规则）全部被接受，日志输出 `Initial configuration complete` 与 `Mixed(http+socks) proxy listening at: 127.0.0.1:7899`，且 `MATCH`-only 规则不触发 geoip 下载；订阅 URL 与节点过滤正则经占位符替换写入后无残留，含 `&` 的订阅链接不会被 shell 破坏。
   - 未验证：没有配置真实订阅跑过完整 workflow，住宅节点对 hCaptcha 通过率的实际收益待云端一次真实运行确认。`url-test` 默认取最快节点，如果订阅里同时有机房和住宅节点，必须配 `PROXY_NODE_FILTER`，否则大概率仍选中机房节点、等于没换。
+
+### 2026-10-09 修复代理步骤导致工作流 startup_failure（secrets 不能用在 steps[*].if）
+
+- 现象：
+  - run 37871445205（`workflow_dispatch`，master `313ad02`）结论为 `startup_failure`，`updated_at - created_at` 只有 1 秒，`/actions/runs/<id>/jobs` 返回 404——job 根本没被创建。
+  - 也就是说失败发生在工作流**文件校验**阶段，而不是任何一步执行阶段。
+- 根因判断：
+  - `actionlint 1.7.12` 给出确定性结论：`steps[*].if` 允许的上下文只有 `env, github, inputs, job, matrix, needs, runner, steps, strategy, vars`，**`secrets` 不在其中**。
+  - 上一轮新增的 `if: ${{ secrets.BROWSER_PROXY != '' }}` 与 `if: ${{ secrets.PROXY_SUBSCRIPTION != '' && secrets.BROWSER_PROXY == '' }}` 两处均触发 `context "secrets" is not allowed here`，使整个工作流判为无效。
+  - 上一轮只做了 PyYAML 解析校验，PyYAML 只验证 YAML 语法，无法发现 GitHub 表达式层的上下文限制，所以漏掉了这个错误。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/README.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `Detect proxy configuration` 步骤，在 `env` 里接住 `BROWSER_PROXY` / `PROXY_SUBSCRIPTION` 两个 Secret，把「配没配」写成 `HAS_DIRECT_PROXY=1` / `HAS_SUBSCRIPTION=1` 到 `$GITHUB_ENV`；`Resolve browser proxy` 与 `Set up local proxy bridge` 改用 `if: env.HAS_*` 判断。`env` 上下文在 `steps[*].if` 里是放行的，且 `$GITHUB_ENV` 写入的值对后续步骤的 `if` 可见。
+  - 该步骤只打印「已配置 / 未配置」，不打印 Secret 值本身，避免凭证进入作业日志。
+  - 本地验证：`actionlint 1.7.12` 对该文件 0 parse error、0 error；工作流解析为 19 步，两个条件步骤的 `if` 表达式分别为 `env.HAS_DIRECT_PROXY == '1'` 与 `env.HAS_SUBSCRIPTION == '1' && env.HAS_DIRECT_PROXY != '1'`；新增步骤的 run 块 `bash -n` 通过。
+  - 流程改进：后续改 workflow 必须跑 `actionlint`，不能只靠 YAML 解析。`shellcheck` 本机未安装，actionlint 的 shellcheck 与 pyflakes 规则被跳过（日志有明示），run 块目前只覆盖到语法层面。

@@ -21,7 +21,7 @@
 6. 下载 Camoufox 浏览器资源。
 7. 打印实际安装的 Camoufox 构建版本，便于判断 Python 包与浏览器二进制是否配套。
 8. 安装 Playwright Firefox 作为浏览器回退方案。
-9. （可选）解析 `BROWSER_PROXY`，或在配置了 `PROXY_SUBSCRIPTION` 时本地起 mihomo 代理桥。
+9. 检测代理配置（`BROWSER_PROXY` / `PROXY_SUBSCRIPTION`），并按优先级解析：显式代理地址优先，其次本地 mihomo 订阅桥。
 10. （可选）把出口 IP 与归属组织写入 job summary，便于判断是否为住宅出口。
 11. 在 `xvfb` 环境中运行 `uv run app/deploy.py`。
 

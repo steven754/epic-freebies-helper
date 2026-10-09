@@ -73,10 +73,32 @@ jobs:
       - name: Install Playwright Firefox fallback
         run: uv run playwright install firefox
 
+      # secrets 上下文不允许出现在 steps[*].if 里（GitHub 只放行 env/github/inputs/job/
+      # matrix/needs/runner/steps/strategy/vars），直接写 secrets.X != '' 会让整个工作流
+      # 判定为无效并立刻 startup_failure。所以先由一个步骤把「配没配」落成标志位，
+      # 后面的步骤再用 env 上下文判断。
+      - name: Detect proxy configuration
+        env:
+          DIRECT_PROXY: ${{ secrets.BROWSER_PROXY }}
+          SUBSCRIPTION: ${{ secrets.PROXY_SUBSCRIPTION }}
+        run: |
+          if [ -n "$DIRECT_PROXY" ]; then
+            echo "HAS_DIRECT_PROXY=1" >> "$GITHUB_ENV"
+            echo "BROWSER_PROXY: 已配置"
+          else
+            echo "BROWSER_PROXY: 未配置"
+          fi
+          if [ -n "$SUBSCRIPTION" ]; then
+            echo "HAS_SUBSCRIPTION=1" >> "$GITHUB_ENV"
+            echo "PROXY_SUBSCRIPTION: 已配置"
+          else
+            echo "PROXY_SUBSCRIPTION: 未配置"
+          fi
+
       # 可选：直接配置了一条具体代理地址（http/socks5）时原样透传给浏览器。
       # 只把非空值写进 GITHUB_ENV，避免空字符串被 pydantic 解析成非 None。
       - name: Resolve browser proxy
-        if: ${{ secrets.BROWSER_PROXY != '' }}
+        if: env.HAS_DIRECT_PROXY == '1'
         env:
           DIRECT_PROXY: ${{ secrets.BROWSER_PROXY }}
         run: echo "BROWSER_PROXY=$DIRECT_PROXY" >> "$GITHUB_ENV"
@@ -87,7 +109,7 @@ jobs:
       # 订阅里如果同时有机房和住宅节点，用仓库变量 PROXY_NODE_FILTER（正则）筛选，
       # 默认 .*(取最快)。机房节点对 hCaptcha 风控没有帮助，只有住宅/家宽出口才有意义。
       - name: Set up local proxy bridge
-        if: ${{ secrets.PROXY_SUBSCRIPTION != '' && secrets.BROWSER_PROXY == '' }}
+        if: env.HAS_SUBSCRIPTION == '1' && env.HAS_DIRECT_PROXY != '1'
         env:
           SUBSCRIPTION: ${{ secrets.PROXY_SUBSCRIPTION }}
           NODE_FILTER: ${{ vars.PROXY_NODE_FILTER || '.*' }}

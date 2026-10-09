@@ -1581,3 +1581,14 @@
   - 即 Azure 比 G-Core 封得更死（更早失败）。这恰好印证 `HARD_BLOCKED_HINTS` 二级排序的价值：下一版（123718e）起无住宅时会优先选 G-Core，至少能走到商店那道、报错信息也更接近"根因"。
 - 结论不变且被再次夯实：**无论挑 Azure 还是 G-Core，云厂商出口都过不了 Epic 领取**；失败阶段只是随 ASN 不同而在"验证码/登录跳转/商店会话"之间漂移。要跑通领取，必须住宅/ISP 出口。
 - 下一步：等用户换上住宅出口（设 `secrets.BROWSER_PROXY` 或换含住宅节点的订阅 + `PROXY_NODE_FILTER`）后再跑一次，预期能过 `isloggedin` 这道。当前两次失败都是预期内的"订阅质量问题"，不是代码 bug。
+
+### 2026-10-09（续4）本地端到端实测：住宅订阅桥完全跑通，云端唯一缺口是订阅 URL 已过期
+
+- 现象/动作：用户此前给了「含家宽节点的住宅订阅」（15 分钟 token，url 形如 `huaikhwang.central-world.org/.../bolster?token=...`）。本次续跑时该 token 已过期（live fetch 返回 `HTTP 401`），云端 `PROXY_SUBSCRIPTION` 当前指向死链。但缓存的 `sub.yaml`（解码 226 个 `ss://` 节点，其中 52 个 `家宽` 节点）在本机仍存活。
+- 本地实测：把 `sub.yaml` 起本地 HTTP 服务喂给 mihomo 的 http provider，`NODE_FILTER=家宽`、用本机 arm64 二进制跑 `proxy_bridge.py`（本地模式不写 `GITHUB_ENV`）。
+  - 桥加载 52 个家宽节点，并发测速 45/52 存活；
+  - 逐节点实测出口：香港家宽 03→AS9269 HKBN（住宅）、澳门家宽 01→AS4609 CTM（住宅）、日本家宽 03→AS17676 SoftBank（住宅）；
+  - `pick()` 选中 `🇲🇴 澳门家宽 01`（466ms，住宅），出口 `27.109.189.39` ≠ 直连 `110.191.179.246`，桥生效并写出 `BROWSER_PROXY=http://127.0.0.1:7891`。
+  - 结论：代理桥在「住宅订阅」下端到端正确（拉节点→按 ASN 选住宅→出口确实改变），代码层面已无 bug。
+- 云端缺口（唯一阻塞）：`epic-gamer.yml` 接线已确认正确——`Set up local proxy bridge` 在 `HAS_SUBSCRIPTION==1 && HAS_DIRECT_PROXY!=1` 时运行并写 `BROWSER_PROXY`，`Run Epic Awesome Gamer` 消费该变量；`EPIC_EMAIL/PASSWORD/ACCOUNTS` 等秘钥已接好。当前 `PROXY_SUBSCRIPTION` 是过期 token（401），桥拉不到节点，应用回退机房直连，必卡 `captcha_invalid`/`isloggedin=false`。
+- 下一步（待用户提供）：给云端一个【有效住宅订阅 URL】。优先长期有效的住宅订阅（非 15 分钟 trial），设为 `PROXY_SUBSCRIPTION` 并保留 `PROXY_NODE_FILTER=家宽`，每周四定时任务即自动跑绿。也可临时重发 15 分钟 token 让我立刻触发一次验证。

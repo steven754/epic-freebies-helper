@@ -623,7 +623,15 @@ def main() -> int:
     api_put(f"/proxies/{GROUP}", {"name": best["name"]})
     write_env("PROXY_PICKED_NODE", best["name"])
 
-    proxied_ip, proxied_org, _ = egress(proxy=MIXED_PROXY, timeout=10)
+    # 选中节点后要重新建立出站连接，首次请求可能偏慢；只试一次会把"可用但慢"
+    # 误判成"未生效"，从而白白放弃一个能用的代理。给它几次机会。
+    proxied_ip, proxied_org = "", ""
+    for attempt in range(3):
+        proxied_ip, proxied_org, _ = egress(proxy=MIXED_PROXY, timeout=12)
+        if proxied_ip and proxied_ip != direct_ip:
+            break
+        if attempt < 2:
+            time.sleep(3)
     effective = bool(proxied_ip) and proxied_ip != direct_ip
     tier_label = TIER_LABEL[best["tier"]]
 

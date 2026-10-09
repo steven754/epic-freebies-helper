@@ -1567,3 +1567,17 @@
   - 补进 self-test 锁定：机房内 G-Core 优于 Azure。
   - `_hard_blocked_penalty` 对缺 `org` 字段的结果用 `r.get("org","")` 兜底，避免 self-test 里不含 org 的用例 KeyError。
 - 说明：这只是"没有住宅节点时的次优解"，无论挑 Azure 还是 G-Core，云厂商出口都过不了 Epic 领取；真正的出路仍是住宅/ISP 出口。该改动提交后，正在跑的 37881305883 用的是上一版（可能挑到 Azure），下一版才生效。
+
+### 2026-10-09（续3）run 37881305883 验证结果：警告如实渲染，且印证 Azure 比 G-Core 封得更死
+
+- 结果（commit f98eae8，桥步骤成功、应用步骤失败，符合预期）：
+  - 桥：`本地代理桥就绪 | 直连=4.154.55.34 | 代理=20.230.241.218 | 节点=🇺🇸美国-A(通用) | 类型=机房`——分类器修正生效，G-Core/Azure 都正确标成 `机房`，不再静默成 `未知`。
+  - 警告如实打出：`##[warning]订阅里全部可用出口都是机房/数据中心网段（如 AS8075 Microsoft Corporation），没有任何住宅/家宽(ISP)节点...`——这次在真实 runner 上确认渲染，不是只过自检。
+  - 这一版还没带选点惩罚，于是 `pick()` 按最低延迟挑了 Azure（`20.230.241.218`，163ms）而非 G-Core。
+  - 应用侧：hCaptcha 四次 `Challenge success` 都过了，但每次 `Login attempt failed: TimeoutError('Timed out waiting for Epic login outcome')`——Epic 在登录完成跳转这一步直接卡住/超时。27 分钟、5 次重试全同，最终 `RuntimeError: Authentication failed, aborting this run`。
+- 关键对照：
+  - Azure 出口（本跑）：验证码能过，但**登录跳转超时**，根本到不了商店。
+  - G-Core 出口（上一跑 37879445985）：验证码能过、登录能完成，但**商店 `isloggedin=false`**。
+  - 即 Azure 比 G-Core 封得更死（更早失败）。这恰好印证 `HARD_BLOCKED_HINTS` 二级排序的价值：下一版（123718e）起无住宅时会优先选 G-Core，至少能走到商店那道、报错信息也更接近"根因"。
+- 结论不变且被再次夯实：**无论挑 Azure 还是 G-Core，云厂商出口都过不了 Epic 领取**；失败阶段只是随 ASN 不同而在"验证码/登录跳转/商店会话"之间漂移。要跑通领取，必须住宅/ISP 出口。
+- 下一步：等用户换上住宅出口（设 `secrets.BROWSER_PROXY` 或换含住宅节点的订阅 + `PROXY_NODE_FILTER`）后再跑一次，预期能过 `isloggedin` 这道。当前两次失败都是预期内的"订阅质量问题"，不是代码 bug。

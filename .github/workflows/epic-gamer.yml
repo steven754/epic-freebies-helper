@@ -139,6 +139,7 @@ jobs:
           mode: rule
           log-level: info
           ipv6: false
+          external-controller: 127.0.0.1:9090
           proxy-providers:
             sub:
               type: http
@@ -173,22 +174,58 @@ jobs:
           ' "$WORK/config.yaml" "$SUBSCRIPTION" "$NODE_FILTER"
 
           nohup "$WORK/mihomo" -d "$WORK" -f "$WORK/config.yaml" > "$WORK/mihomo.log" 2>&1 &
-          ready=0
+
+          # 1) 等控制端口起来
           for _ in $(seq 1 30); do
-            if curl -sf --max-time 3 -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204 -o /dev/null; then
-              ready=1
+            if curl -sf --max-time 3 http://127.0.0.1:9090/version -o /dev/null; then
               break
             fi
             sleep 2
           done
-          if [ "$ready" -eq 1 ]; then
+
+          # 2) 等订阅真正加载出节点。mihomo 在代理组为空时会让请求直接出去，
+          #    此时对 127.0.0.1:7890 的健康检查照样返回 200，所以必须等节点数 > 0。
+          nodes=0
+          for _ in $(seq 1 40); do
+            nodes=$(curl -s --max-time 3 http://127.0.0.1:9090/proxies/PROXY 2>/dev/null \
+              | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("all",[])))' 2>/dev/null \
+              || echo 0)
+            nodes=$(printf '%s' "$nodes" | tr -dc '0-9')
+            nodes=${nodes:-0}
+            if [ "$nodes" -gt 0 ]; then
+              break
+            fi
+            sleep 3
+          done
+          selected=$(curl -s --max-time 3 http://127.0.0.1:9090/proxies/PROXY 2>/dev/null \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin).get("now",""))' 2>/dev/null \
+            || echo "")
+          echo "代理组可用节点数: $nodes | 选中节点: ${selected:-无}"
+
+          # 3) 真正的判据：经代理的出口 IP 必须和直连 IP 不同。
+          direct_ip=$(curl -s --max-time 10 https://ipinfo.io/ip || true)
+          proxy_ip=""
+          for _ in $(seq 1 20); do
+            proxy_ip=$(curl -s --max-time 10 -x http://127.0.0.1:7890 https://ipinfo.io/ip || true)
+            if [ -n "$proxy_ip" ] && [ "$proxy_ip" != "$direct_ip" ]; then
+              break
+            fi
+            sleep 3
+          done
+          direct_ip=$(printf '%s' "$direct_ip" | tr -d '[:space:]')
+          proxy_ip=$(printf '%s' "$proxy_ip" | tr -d '[:space:]')
+
+          if [ -n "$proxy_ip" ] && [ "$proxy_ip" != "$direct_ip" ]; then
             echo "BROWSER_PROXY=http://127.0.0.1:7890" >> "$GITHUB_ENV"
-            echo "本地代理桥就绪 | 127.0.0.1:7890"
+            echo "本地代理桥就绪 | 直连=$direct_ip | 代理=$proxy_ip | 节点=${selected:-未知}"
           else
-            # 桥没起来就不写 BROWSER_PROXY，让任务回退到无代理直连，而不是带一个死代理硬跑
-            echo "::warning::本地代理桥未能就绪，本次运行将不使用代理（机房 IP 直连）"
-            echo "--- mihomo.log ---"
-            tail -40 "$WORK/mihomo.log" || true
+            # 出口没变说明订阅节点没生效（节点组为空 / 订阅拉取失败 / filter 把所有节点筛掉了）。
+            # 这种情况绝不写 BROWSER_PROXY：带着一个等于直连的代理只会改变浏览器网络指纹，
+            # 让 hCaptcha 更难，却拿不到换 IP 的任何好处。
+            echo "::warning::代理出口与直连相同（${proxy_ip:-无响应}），订阅节点未生效，本次运行不使用代理"
+            echo "代理组可用节点数: $nodes | 选中节点: ${selected:-无}"
+            echo "--- mihomo.log (tail 60) ---"
+            tail -60 "$WORK/mihomo.log" || true
           fi
 
       # 把出口 IP 和归属组织打进 job summary：一眼判断订阅节点是不是住宅/家宽出口。

@@ -1485,3 +1485,24 @@
   - 流程改进：后续改 workflow 必须跑 `actionlint`，不能只靠 YAML 解析。`shellcheck` 本机未安装，actionlint 的 shellcheck 与 pyflakes 规则被跳过（日志有明示），run 块目前只覆盖到语法层面。
 
 - 补充（同日）：`Report egress IP` 改为 `tee -a "$GITHUB_STEP_SUMMARY"`，让出口 IP 同时落在作业日志里。此前只写 `$GITHUB_STEP_SUMMARY`，而 job summary 无法从日志或 artifact 里读到（check-runs API 的 `output.summary` 也要等作业结束才发布），排查时只能靠网页肉眼查看。
+
+### 2026-10-09 修复代理桥假阳性：健康检查通过但订阅节点并未生效
+
+- 现象：
+  - run 37871693992 里 `Set up local proxy bridge` 报 success、应用日志 `proxy_enabled=True`、`BROWSER_PROXY=http://127.0.0.1:7890` 确实注入成功。
+  - 但 `Report egress IP` 显示直连与经代理的出口 **是同一个 IP**：`20.169.101.185`（Phoenix，AS8075 Microsoft）。
+  - 同时 hCaptcha 难度异常上升：本次出现 `image_drag_multi` 12 次（此前无代理的运行里该题型一次都没出现），`Challenge success` 只有 1 次、`signal=failure` 24 次，另有 6 次 payload timeout 与 2 次 30s 响应超时。
+- 根因判断：
+  - mihomo 在代理组为空、或组内节点全部健康检查失败时会**让请求直接出去**（DIRECT）。此时对 `127.0.0.1:7890` 做 HTTP 健康检查依然返回 200，因此原判据 `curl -sf -x .../generate_204` 是**假阳性**：只证明端口在监听，不证明流量走了节点。
+  - 日志时间也印证：`mihomo version: v1.19.32` 与 `本地代理桥就绪` 之间只隔 2.8 秒，订阅那时根本来不及加载完节点。
+  - 危害不只是"没换 IP"：`BROWSER_PROXY` 一旦注入，`_camoufox_launch_options()` 就不再设置 `network.proxy.type=0`，Firefox 的网络路径与指纹随之改变，hCaptcha 可能因此升级难度——即付出代价却拿不到收益。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/README.md`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 判据换成**出口 IP 比对**：先取直连 IP，再取经 `127.0.0.1:7890` 的 IP，两者不同才认定代理生效并写入 `BROWSER_PROXY`；相同则打 `::warning::` 并放弃使用代理。
+  - 配置增加 `external-controller: 127.0.0.1:9090`，桥接步骤轮询 `/proxies/PROXY` 得到代理组节点数与选中节点并打印；节点数为 0 说明订阅没解析出节点（最常见是填了 base64 通用订阅而非 Clash 订阅）。
+  - 失败分支额外 `tail -60 mihomo.log`，把订阅拉取/解析错误直接暴露在作业日志里。
+  - 本地验证：用一组全是死节点的 `type: file` provider 复现，`nodes=2`、`direct_ip == proxy_ip == 110.191.179.246`，新判据正确判定"代理未生效"，而旧判据（仅 204 健康检查）返回通过——两个方向都得到确认。另 `actionlint 1.7.12` 无告警，`bash -n` 通过。
+  - 未验证：订阅本身为什么没产出可用节点尚未确定，需要看下一次运行输出的节点数与 `mihomo.log`。同样未经证实的是"代理出口 IP 变更为住宅后登录能否通过"。

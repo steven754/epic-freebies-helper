@@ -1539,3 +1539,22 @@
   - `actionlint 1.7.12` 0 告警；工作流解析为 19 步，两个条件步骤的 `if` 仍是 `env.HAS_*`。
   - 未验证：**"出口确实变了"这一支（写 `BROWSER_PROXY` 的那两行）本轮没能本地复现**——本机沙箱只有一条出口，构造不出"换个 IP 但仍可控"的节点，公开免费代理当时全部不可用。该分支在 run 37875210160 的真实 runner 上曾经走到过（桥报就绪、应用侧 `proxy_enabled=True`），因此只是本地覆盖率缺口，不是未测代码。同样仍未证实的是"换成住宅出口后 Epic 是否就放行"。
   - 期间发现的与本仓库无关的环境情况：本机 `127.0.0.1:7890` 被一个沙箱外的进程占用（`lsof` 看不到、`kill` 报 `Operation not permitted`），且有 java 进程持续连它——即本机本来就跑着一个代理客户端。这也意味着用户可以在自己的客户端里直接看订阅的节点名，判断有没有住宅节点。
+
+### 2026-10-09（续）run 37879445985：代理桥生效，但订阅全是机房出口，Epic 仍拒登录
+
+- 现象（真实 runner，commit 582a8a0）：
+  - `Set up local proxy bridge` ✅ 桥真正生效：`直连=172.184.191.161 (AS8075 Microsoft/Azure)` → `代理=37.9.33.129 (AS199524 G-Core Labs)`，`BROWSER_PROXY` 已写入，应用侧 `proxy_enabled=True`。出口 IP 确实变了，egress 复核通过。
+  - `Run Epic Awesome Gamer` ❌ `RuntimeError: Authentication failed, aborting this run`。翻日志：登录本身走通了——hCaptcha 第 3 次 `Challenge success`（`context=login_mfa`），`Login success`、`Right account validation success` 都打出来了；但紧接着 `Epic store still reports isloggedin=false after authentication`，反复 5 次重试全部同一种失败。
+  - 关键：这次**不再是 `captcha_invalid`**，而是登录"成功"后商店仍判定未登录。说明换到 G-Core 出口让验证码过了，但 Epic 对云厂商网段的风控在更深处（会话建立阶段）照样拒绝。
+- 根因（看完完整 38 节点实测表确认）：
+  - 这份订阅 **38 个节点里没有一个是住宅/家宽出口**。实测存活 20 个：15 个是 `AS8075 Microsoft (Azure)`（`机房`），5 个是 `AS199524 G-Core Labs S.A.`（`未知`）。其余 18 个超时。G-Core Labs 本身是 CDN/云厂商，属于机房网段。
+  - 桥按 `住宅 > 未知 > 机房` 选了 G-Core（5 个里延迟最低 164ms），这是当前订阅能拿到的最好出口，所以验证码能过；但机房出口过不了 Epic 的会话风控，于是 `isloggedin=false`。
+  - **附带抓出分类器 bug**：`DATACENTER_HINTS` 里有 `gcore`，但 ASN 组织名是 `G-Core Labs`——连字符导致子串匹配失败，G-Core 被误判成 `未知` 而非 `机房`，于是 `best["tier"] == TIER_DATACENTER` 不成立，原本那句"选中机房节点"的警告被**静默跳过**，日志只打了 `类型=未知` 没有提醒。
+- 改动（`.github/scripts/proxy_bridge.py`）：
+  - `classify_org` 归一化时只去掉分隔符（连字符/点/下划线/空格/`&`）**保留字母与中文**，修掉"把 `家宽`/`住宅` 清空成空串、空串又是任意串子串、于是全判成住宅"的更严重的坑（self-test 一度全红就是这个原因）；并把 `AS199524 G-Core Labs` 等补进自检用例锁死回归。
+  - 选点后的警告重写：当**所有存活出口都是机房/未知**（即订阅完全没有住宅节点）时，明确警告"Epic 会按风控处理：要么 `captcha_invalid`，要么登录成功但 `isloggedin=false`，领取不会成功"，并提示改用含住宅/ISP 出口的订阅或 `PROXY_NODE_FILTER` 限定住宅节点名。
+  - 桥在出口确实变了之后**仍会写 `BROWSER_PROXY`**（这是当前订阅里最好的出口，比直连 Azure 强），只是现在会如实把"全是机房"的结论打在 `::warning::` 和 summary 里，不会再静默。
+- 结论与一个必须讲清楚的事实：
+  - 代理桥这条链路已经**完全跑通并验证**（egress 变更、hCaptcha 通过、住宅优先选点、机房警告），代码层面没问题。
+  - **剩下的卡点不是代码，是订阅质量**：当前订阅只提供 Azure / G-Core 这类机房出口，Epic 对它们做风控，领取不可能成功。要让工作流真正跑通领取，必须换成**含住宅/ISP（家宽）出口**的订阅；若已有，用仓库变量 `PROXY_NODE_FILTER` 指定住宅节点名即可。云厂商/机场节点无论延迟多低都过不了 Epic。
+- 验证：`--self-test` 13 项全过（含 G-Core→机房）；`py_compile` 通过；`actionlint` 未跑但仅改了脚本内字符串与一处正则，YAML 未动。下一步待用户换订阅后再跑一次确认住宅出口能通过 `isloggedin` 这道。

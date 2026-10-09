@@ -15,6 +15,9 @@ mihomo(clash.meta) 转成 http+socks5 混合端口，再通过 BROWSER_PROXY 喂
   * 代理出口 IP 与直连 IP 相同 => 桥等于没生效，绝不能写 BROWSER_PROXY，
     否则只是白白改变浏览器的网络指纹，让验证码更难；
   * 出口是机房网段 => 记为警告，并把节点名和 ASN 打进 summary，便于换节点。
+    机房 IP 不仅会让 hCaptcha 返回 `captcha_invalid`，更会在登录"成功"后让
+    store.epicgames.com 仍报告 `isloggedin=false`——两种都是 Epic 对云厂商
+    网段的风控，本质是同一个问题：没有住宅/家宽出口就过不了领取。
 
 本脚本做的事
 ------------
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -162,16 +166,33 @@ TIER_LABEL = {
 }
 
 
+def _norm_org(s: str) -> str:
+    """只去掉分隔符（连字符/点/下划线/空格/&），保留字母与中文，
+    让 `G-Core` 能命中 `gcore`、`Microsoft-Corporation` 能命中 `microsoft`，
+    同时中文住宅特征（家宽/住宅）不被清空。
+
+    注意：绝不能用 `[^a-z0-9]` 清空所有非 ASCII——那样会把 `家宽`/`住宅`
+    变成空串，而空串是任何字符串的子串，会导致全部误判成住宅。
+    """
+    return re.sub(r"[\s\-_./&]", "", (s or "").lower())
+
+
 def classify_org(org: str) -> int:
-    """按 ASN 组织名判定出口类型。住宅特征优先于机房特征。"""
-    text = (org or "").lower()
+    """按 ASN 组织名判定出口类型。住宅特征优先于机房特征。
+
+    注意：ASN 组织名里常带连字符（如 `G-Core Labs`、`Microsoft-Corporation`），
+    直接做子串匹配会漏掉。先归一化分隔符再比，避免把明明的机房网段误判成"未知"。
+    """
+    text = _norm_org(org)
     if not text:
         return TIER_UNKNOWN
     for hint in RESIDENTIAL_HINTS:
-        if hint in text:
+        nh = _norm_org(hint)
+        if nh and nh in text:
             return TIER_RESIDENTIAL
     for hint in DATACENTER_HINTS:
-        if hint in text:
+        nh = _norm_org(hint)
+        if nh and nh in text:
             return TIER_DATACENTER
     return TIER_UNKNOWN
 
@@ -664,12 +685,28 @@ def main() -> int:
         f"本地代理桥就绪 | 直连={direct_ip} | 代理={proxied_ip} | "
         f"节点={best['name']} | 类型={tier_label}"
     )
-    if best["tier"] == TIER_DATACENTER:
+
+    # 出口已经真正改变（否则前面就 return 了），所以仍然把代理喂给浏览器——
+    # 这是当前订阅里能拿到的最好出口。但机房/未知网段对 Epic 风控几乎没帮助，
+    # 必须明确告诉用户：本次运行很可能过不了登录/领取。
+    alive_tiers = [r["tier"] for r in results]
+    has_residential = any(t >= TIER_RESIDENTIAL for t in alive_tiers)
+    if not has_residential:
+        # 全部可用出口都是机房/未知网段：Epic 会直接按风控处理。
+        # 轻则登录页验证码过不去（captcha_invalid），重则登录"成功"但商店
+        # 仍判定未登录（isloggedin=false），领取不会真正完成。
         warn(
-            "订阅里没有住宅/家宽出口，选中的仍是机房节点"
-            f"（{proxied_org}）。机房网段对 hCaptcha 风控基本没有帮助，"
-            "Epic 仍可能返回 captcha_invalid。建议换成含住宅节点的订阅，"
-            "或用仓库变量 PROXY_NODE_FILTER 指定住宅节点。"
+            "订阅里全部可用出口都是机房/数据中心网段"
+            f"（如 {proxied_org}），没有任何住宅/家宽(ISP)节点。"
+            "Epic 会对这类云厂商 IP 做风控：要么 hCaptcha 过不去(captcha_invalid)，"
+            "要么登录成功但 store.epicgames.com 仍报告 isloggedin=false，领取不会成功。"
+            "要让工作流跑通，请改用含住宅/ISP 出口的订阅；若已有，"
+            "用仓库变量 PROXY_NODE_FILTER 指定住宅节点名（如含 住宅/家宽/ISP/宽带 字样的节点）。"
+        )
+    elif best["tier"] < TIER_RESIDENTIAL:
+        warn(
+            "选中的仍是机房/未知节点（" + proxied_org + "），住宅节点不可用。"
+            "Epic 可能仍以风控理由拒绝，建议优先使用住宅出口。"
         )
     return 0
 
@@ -684,6 +721,8 @@ def self_test() -> int:
         ("AS17621 China Unicom Shanghai", TIER_RESIDENTIAL),
         ("AS7922 Comcast Cable Communications, LLC", TIER_RESIDENTIAL),
         ("AS13335 Cloudflare, Inc.", TIER_DATACENTER),
+        ("AS199524 G-Core Labs S.A.", TIER_DATACENTER),
+        ("AS14061 DigitalOcean, LLC", TIER_DATACENTER),
         ("AS401120 Some Small Network", TIER_UNKNOWN),
         ("", TIER_UNKNOWN),
     ]

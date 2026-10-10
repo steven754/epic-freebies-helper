@@ -1613,3 +1613,10 @@
 - 截至 Sat 10:16 复测：该 token 已 `HTTP 401`（确实过期，距上次可用约 17 小时）。所以现在既没有有效订阅，也没有在跑的 run。
 - 结论与下一步：要云端跑绿，必须 (1) 用户给一个【有效】的住宅订阅 URL（重发 trial token 或更长寿命的住宅订阅）；(2) 因为 runner 直连不了订阅主机，必须走 **gist 中转**——我本机拉到新鲜节点 → 发到 gist（gist.githubusercontent.com 在 runner 上可达，run 37899495839 已证它能从 gist 加载 52 节点）→ 设 `PROXY_SUBSCRIPTION` 为 gist raw → 立刻触发。这样桥在触发后 ~30s 吃到新鲜活节点，同时避开"runner 直连订阅主机被墙"和"gist 里是过期节点"两个坑。
 - 已清理：删除那个 404 的临时 gist（825def…）。`PROXY_SUBSCRIPTION` 待用户给新订阅后重设。
+
+### 2026-10-10（续7）补充一键中继脚本 relay_subscription.sh，并复测死 token 守卫
+
+- 目的：上次 SIGTERM 那次把"抓订阅→发 gist→设秘钥→触发"拆成一条会被打断的复合命令，留下 404 gist + 半配置秘钥。为杜绝复发，新增 `.github/scripts/relay_subscription.sh`：本机拉订阅→校验含 ss:// 节点→`gh gist create`（unlisted）→`gh secret set PROXY_SUBSCRIPTION`→`gh workflow run`→轮询到"Set up local proxy bridge"步骤跑完→`gh gist delete`。任何一步失败（非 200 / 不是合法订阅 / gist 创建失败）直接退出，**绝不留下半截 gist**。
+- 守卫复测：用已死的 token（HTTP 401）跑脚本，正确在 [1/6] 拉取阶段中止并打印"订阅拉取失败…不创建 gist，直接退出"，`gh gist list` 确认为空——证明不会误建 gist。
+- 顺便把仍指向死 404 gist 的 `PROXY_SUBSCRIPTION` 秘钥 `gh secret delete` 清掉，仓库回到"未配置订阅"的干净态。下次用户给【有效住宅订阅 URL】后，一条 `bash .github/scripts/relay_subscription.sh <URL>` 即可完成"新鲜节点→gist 中转→触发→桥吃到活节点→领完删 gist"全链路。
+- 状态仍未绿：根因是缺有效住宅订阅（token 401 已死），代码与接线均已确证正确。等待用户提供新鲜订阅。

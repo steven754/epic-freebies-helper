@@ -187,6 +187,12 @@ jobs:
           MPLBACKEND: Agg
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: app
+          # 让 Python 侧的 LLM 调用（hCaptcha 分类器用的 GLM）也走住宅代理出口。
+          # 直连 Azure 云 IP 时 GLM 端点 50s ReadTimeout（被 geo-block 静默丢弃），
+          # 住宅出口可绕过；浏览器侧仍用显式 BROWSER_PROXY，不会双重代理。
+          HTTP_PROXY: ${{ secrets.BROWSER_PROXY }}
+          HTTPS_PROXY: ${{ secrets.BROWSER_PROXY }}
+          GLM_REQUEST_TIMEOUT_SECONDS: "120"
         run: |
           echo "🚀 启动定时领取任务（支持 Gemini/AiHubMix/GLM）..."
           xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run app/deploy.py

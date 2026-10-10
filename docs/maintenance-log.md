@@ -1620,3 +1620,12 @@
 - 守卫复测：用已死的 token（HTTP 401）跑脚本，正确在 [1/6] 拉取阶段中止并打印"订阅拉取失败…不创建 gist，直接退出"，`gh gist list` 确认为空——证明不会误建 gist。
 - 顺便把仍指向死 404 gist 的 `PROXY_SUBSCRIPTION` 秘钥 `gh secret delete` 清掉，仓库回到"未配置订阅"的干净态。下次用户给【有效住宅订阅 URL】后，一条 `bash .github/scripts/relay_subscription.sh <URL>` 即可完成"新鲜节点→gist 中转→触发→桥吃到活节点→领完删 gist"全链路。
 - 状态仍未绿：根因是缺有效住宅订阅（token 401 已死），代码与接线均已确证正确。等待用户提供新鲜订阅。
+
+### 2026-10-10（续8）直连住宅代理跑通出口+GLM，但代理会话已过期
+
+- 用户提供直连家宽代理 `resi-ipv4-1.gw.tprx.io:20000`（host:port:user:pass）。本机实测出口 `181.175.14.133` AS14522 SETEL/XTRIM（厄瓜多尔住宅 ISP），确为住宅；转 `http://user:pass@host:port` 设为 `BROWSER_PROXY` 秘钥，触发 run 38039461627。
+- run 38039461627 结论=failure，但**出口阻塞已解决**：浏览器走住宅出口直达 Epic 登录+hCaptcha，无 IP 层硬拦、无 connection refused。新阻塞=hCaptcha 分类器用的 **GLM** 从 Azure 调超时（50s ReadTimeout×3），且 GEMINI_API_KEY 空→分类器不可用→登录超时。
+- 修复（commit 5faf50b）：`Run Epic Awesome Gamer` 步骤加 `HTTP_PROXY`/`HTTPS_PROXY`（复用 BROWSER_PROXY，让 Python 侧 GLM 调用也走住宅出口）+ `GLM_REQUEST_TIMEOUT_SECONDS=120`。触发 run 38040917316。
+- run 38040917316 结论=failure，但确认**两道阻塞已解**：(1) `proxy_enabled=True`；(2) `GLM request timed out` 次数=0（上轮遍地都是）。剩余阻塞=hCaptcha `checkcaptcha` 报 `Network.getResponseBody: Request "719-redirect1" is not found`→`challenge_execution_timeout`→登录超时——代理在中途把 hcaptcha.com 的 API 请求丢弃/407 所致（captcha 绑死单 IP，代理掉线即验证失败）。
+- 本机复测该代理：现在 `curl -x` 对 ipinfo/example/google/hcaptcha 全部 `407 Proxy Authentication Required`（HTTP 000）；早些时候还能出 `181.175.14.133`。结论：**该住宅代理会话已过期/失效**（限时会话，同之前 15 分钟 trial token 性质）。
+- 当前状态：代码侧已验证可过【住宅出口 + GLM 连通 + 浏览器打到 captcha】三关；唯一缺口是【一个仍活着、且 hCaptcha 接受、最好非旋转(sticky)的住宅代理】。`BROWSER_PROXY` secret 仍是那个死 URL，下次用户给新代理直接覆盖即可。未断言绿。
